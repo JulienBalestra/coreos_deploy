@@ -1,0 +1,696 @@
+#cloud-config
+
+coreos:
+  update:
+    reboot-strategy: "off"
+    group: "alpha"
+
+  units:
+    - name: diskpcent.service
+      command: start
+      enable: true
+      content: |
+        [Service]
+        SyslogIdentifier=%p
+        ExecStart=/bin/bash -c 'while true; do df / --output=pcent | tail -1 | tr -d "% "; sleep 60; done'
+        Restart=always
+        RestartSec=10
+
+    - name: diskavail.service
+      command: start
+      enable: true
+      content: |
+        [Service]
+        SyslogIdentifier=%p
+        ExecStart=/bin/bash -c 'while true; do df / --output=avail | tail -1; sleep 60; done'
+        Restart=always
+        RestartSec=10
+
+    - name: download-network-environment.service
+      command: start
+      enable: true
+      content: |
+        [Unit]
+        Description=download network environment binary
+        After=network-online.target
+
+        [Service]
+        Environment=TARGET_URL=https://github.com/kelseyhightower/setup-network-environment/releases/download/1.0.1/setup-network-environment
+        ExecStartPre=/opt/bin/wait-until-reachable $TARGET_URL
+        ExecStartPre=-/usr/bin/mkdir -p /opt/bin
+        ExecStart=/usr/bin/curl -Ls $TARGET_URL \
+          -o /opt/bin/setup-network-environment
+        ExecStartPost=/usr/bin/chmod +x /opt/bin/setup-network-environment
+        RemainAfterExit=yes
+        Type=oneshot
+
+    - name: setup-network-environment.service
+      command: start
+      enable: true
+      content: |
+        [Unit]
+        Description=setup network environment
+        Requires=download-network-environment.service
+        After=download-network-environment.service
+
+        [Service]
+        ExecStart=/opt/bin/setup-network-environment
+        Type=oneshot
+
+    - name: setup-etcd2-environment.service
+      command: start
+      enable: true
+      content: |
+        [Unit]
+        Description=setup etcd2 environment
+        Requires=setup-network-environment.service
+        After=setup-network-environment.service
+
+        [Service]
+        User=etcd
+        EnvironmentFile=/etc/network-environment
+        ExecStart=/opt/bin/setup-etcd2-environment
+        RemainAfterExit=yes
+        Type=oneshot
+
+    - name: etcd2.service
+      command: start
+      enable: true
+      drop-ins:
+        - name: "10-env-file.conf"
+          content: |
+            [Unit]
+            Requires=setup-etcd2-environment.service
+            After=setup-etcd2-environment.service
+
+            [Service]
+            EnvironmentFile=/etc/etcd2-environment
+
+    - name: download-journald-stream.service
+      command: start
+      enable: true
+      content: |
+        [Unit]
+        Description=download journald stream binary
+        After=network-online.target
+
+        [Service]
+        Environment=TARGET_URL=https://github.com/JulienBalestra/journald-stream/releases/download/0.3/journald-stream
+        ExecStartPre=/opt/bin/wait-until-reachable $TARGET_URL
+        ExecStartPre=/usr/bin/mkdir -p /opt/bin
+        ExecStart=/usr/bin/curl -Ls $TARGET_URL \
+          -o /opt/bin/journald-stream
+        ExecStartPost=/usr/bin/chmod +x /opt/bin/journald-stream
+        RemainAfterExit=yes
+        Type=oneshot
+
+    - name: download-confd.service
+      command: start
+      enable: true
+      content: |
+        [Unit]
+        Description=download confd binary
+        After=network-online.target
+
+        [Service]
+        Environment=TARGET_URL=https://github.com/kelseyhightower/confd/releases/download/v0.11.0/confd-0.11.0-linux-amd64
+        ExecStartPre=/opt/bin/wait-until-reachable $TARGET_URL
+        ExecStartPre=/usr/bin/mkdir -p /opt/bin
+        ExecStart=/usr/bin/curl -Ls $TARGET_URL \
+          -o /opt/bin/confd
+        ExecStartPost=/usr/bin/chmod +x /opt/bin/confd
+        RemainAfterExit=yes
+        Type=oneshot
+
+    - name: fleet.service
+      command: start
+      enable: true
+
+    - name: flanneld.service
+      command: start
+      enable: true
+      drop-ins:
+        - name: "50-network-config.conf"
+          content: |
+            [Service]
+            ExecStartPre=/usr/bin/etcdctl set /coreos.com/network/config \
+              '{"Network":"10.1.0.0/16", "Backend": {"Type": "vxlan"}}'
+
+    - name: elasticsearch@.service
+      content: |
+        [Unit]
+        Requires=flanneld.service
+        After=flanneld.service
+
+        [Service]
+        EnvironmentFile=/run/flannel/subnet.env
+        TimeoutStartSec=5min
+        ExecStartPre=/usr/bin/docker pull elasticsearch
+        ExecStartPre=/usr/bin/test $FLANNEL_NETWORK
+        ExecStart=/usr/bin/docker run --name %p_%i --rm elasticsearch -Des.network.host=0.0.0.0
+        Restart=always
+        RestartSec=10
+
+        [X-Fleet]
+        Conflicts=elasticsearch*
+
+    - name: elasticsearch@master.fleet.service
+      command: start
+      enable: true
+      content: |
+        [Unit]
+        Requires=flanneld.service
+        After=flanneld.service
+        Requires=fleet.service
+        After=fleet.service
+        Requires=etcd2.service
+        After=etcd2.service
+
+        [Service]
+        WorkingDirectory=/etc/systemd/system/
+        TimeoutStartSec=5min
+        ExecStart=/opt/bin/fleet-ensure-launched elasticsearch@master
+        ExecStartPost=/opt/bin/fleet-ensure-launched sidekick-elasticsearch@master
+        RemainAfterExit=yes
+        Type=oneshot
+
+    - name: sidekick-elasticsearch@.service
+      content: |
+        [Unit]
+        Requires=etcd2.service
+        After=etcd2.service
+
+        [Service]
+        ExecStartPre=/usr/bin/etcdctl cluster-health
+        ExecStartPre=/usr/bin/docker inspect --format='{{.Name}} is {{.State.Status}}' elasticsearch_%i
+        ExecStart=/opt/bin/sidekick elasticsearch_%i
+        ExecStop=-/usr/bin/etcdctl rm elasticsearch_%i
+        Restart=always
+        RestartSec=10
+
+        [X-Fleet]
+        MachineOf=elasticsearch@%i.service
+
+    - name: setup-logstash-conf.service
+      command: start
+      enable: true
+      content: |
+        [Unit]
+        Description=Download and set logstash config
+        Requires=etcd2.service
+        After=etcd2.service
+
+        [Service]
+        SyslogIdentifier=%p
+        ExecStartPre=/opt/bin/ensure-etcd-cluster-health
+        ExecStartPre=-/usr/bin/etcdctl mkdir logstash/inputs
+        ExecStartPre=-/usr/bin/etcdctl mkdir logstash/filters
+        ExecStartPre=-/usr/bin/etcdctl mkdir logstash/outputs
+        ExecStart=/bin/bash -c \
+          "/usr/bin/etcdctl set logstash/inputs/00-input-journald-stream.conf \
+            \"$(/usr/bin/curl -sL https://raw.githubusercontent.com/JulienBalestra/coreos_deploy/master/install/logstash/00-input-journald-stream.conf)\" \
+          ;\
+          /usr/bin/etcdctl set logstash/filters/00-filter-journald-stream.conf \
+            \"$(/usr/bin/curl -sL https://raw.githubusercontent.com/JulienBalestra/coreos_deploy/master/install/logstash/00-filter-journald-stream.conf)\" \
+          ;\
+          /usr/bin/etcdctl set logstash/outputs/99-output-base.conf \
+            \"$(/usr/bin/curl -sL https://raw.githubusercontent.com/JulienBalestra/coreos_deploy/master/install/logstash/99-output-base.conf)\""
+        RemainAfterExit=yes
+        Type=oneshot
+
+    - name: logstash.fleet.service
+      command: start
+      enable: true
+      content: |
+        [Unit]
+        Requires=download-confd.service
+        After=download-confd.service
+        Requires=flanneld.service
+        After=flanneld.service
+        Requires=fleet.service
+        After=fleet.service
+        Requires=etcd2.service
+        After=etcd2.service
+
+        [Service]
+        SyslogIdentifier=%p
+        WorkingDirectory=/etc/systemd/system/
+        TimeoutStartSec=5min
+        ExecStartPre=/usr/bin/fleetctl load logstash.service
+        ExecStart=/opt/bin/fleet-ensure-launched logstash.confd.service
+        RemainAfterExit=yes
+        Type=oneshot
+
+    - name: logstash.confd.service
+      content: |
+        [Unit]
+        Requires=download-confd.service
+        Requires=etcd2.service
+        After=etcd2.service
+        After=download-confd.service
+        Requires=flanneld.service
+        After=flanneld.service
+
+        [Service]
+        SyslogIdentifier=%p
+        WorkingDirectory=/etc/systemd/system/
+        EnvironmentFile=/run/flannel/subnet.env
+        ExecStartPre=/usr/bin/etcdctl get elasticsearch_master
+        ExecStartPre=/usr/bin/docker pull logstash
+        ExecStartPre=/usr/bin/test $FLANNEL_NETWORK
+        ExecStart=/opt/bin/confd -confdir="/opt/logstash_fowarder/confd" -node http://127.0.0.1:2379 -watch=true
+        Restart=always
+        RestartSec=30
+        TimeoutStartSec=5min
+
+        [X-Fleet]
+        Global=true
+
+    - name: logstash.service
+      content: |
+        [Unit]
+        Requires=setup-logstash-conf.service
+        After=setup-logstash-conf.service
+        Requires=flanneld.service
+        After=flanneld.service
+        Requires=fleet.service
+        After=fleet.service
+        Requires=etcd2.service
+        After=etcd2.service
+
+        [Service]
+        SyslogIdentifier=%p
+        ExecStartPre=/usr/bin/test -f /opt/bin/journald-stream
+        ExecStartPre=/usr/bin/test -f /etc/logstash/logstash.conf
+        ExecStartPre=/usr/bin/test -f /var/lib/journald-stream.d/sincedb
+        ExecStartPre=-/usr/bin/docker stop forwarder
+        ExecStart=/usr/bin/docker run --rm --name forwarder --cpuset-cpus="0" \
+          -v /opt/bin/journald-stream:/opt/journald-stream:ro \
+          -v /run/log/journal:/run/log/journal:ro \
+          -v /etc/logstash/logstash.conf:/etc/logstash.conf:ro \
+          -v /var/lib/journald-stream.d/sincedb:/var/lib/journald-stream.d/sincedb:rw \
+          -e SINCE_DB_PATH=/var/lib/journald-stream.d/sincedb \
+          logstash \
+            /bin/bash -c 'logstash -f /etc/logstash.conf'
+        Restart=always
+        RestartSec=60
+        TimeoutStartSec=5min
+
+        [X-Fleet]
+        Global=true
+
+    - name: kibana.fleet.service
+      command: start
+      enable: true
+      content: |
+        [Unit]
+        Requires=download-confd.service
+        After=download-confd.service
+        Requires=flanneld.service
+        After=flanneld.service
+        Requires=fleet.service
+        After=fleet.service
+        Requires=etcd2.service
+        After=etcd2.service
+
+        [Service]
+        SyslogIdentifier=%p
+        WorkingDirectory=/etc/systemd/system/
+        TimeoutStartSec=5min
+        ExecStartPre=/usr/bin/fleetctl submit kibana.service
+        ExecStart=/opt/bin/fleet-ensure-launched kibana.confd.service
+        ExecStartPost=/opt/bin/fleet-ensure-launched sidekick-kibana.service
+        RemainAfterExit=yes
+        Type=oneshot
+
+    - name: sidekick-kibana.service
+      content: |
+        [Unit]
+        Requires=etcd2.service
+        After=etcd2.service
+
+        [Service]
+        ExecStartPre=/usr/bin/etcdctl cluster-health
+        ExecStartPre=/usr/bin/docker inspect --format='{{.Name}} is {{.State.Status}}' kibana
+        ExecStart=/opt/bin/sidekick-vulcand kibana kibana 5601
+        ExecStop=-/usr/bin/etcdctl rm kibana
+        Restart=always
+        RestartSec=10
+
+        [X-Fleet]
+        MachineOf=kibana.confd.service
+
+    - name: kibana.confd.service
+      content: |
+        [Unit]
+        Requires=download-confd.service
+        After=download-confd.service
+        Requires=flanneld.service
+        After=flanneld.service
+        Requires=fleet.service
+        After=fleet.service
+        Requires=etcd2.service
+        After=etcd2.service
+
+        [Service]
+        SyslogIdentifier=%p
+        EnvironmentFile=/run/flannel/subnet.env
+        WorkingDirectory=/etc/systemd/system/
+        ExecStartPre=/usr/bin/etcdctl get elasticsearch_master
+        ExecStartPre=/usr/bin/docker pull kibana
+        ExecStartPre=/usr/bin/test $FLANNEL_NETWORK
+        ExecStart=/opt/bin/confd -confdir="/opt/kibana/confd" -node http://127.0.0.1:2379 -watch=true
+        Restart=always
+        RestartSec=30
+        TimeoutStartSec=5min
+
+    - name: kibana.service
+      content: |
+        [Unit]
+        Requires=flanneld.service
+        After=flanneld.service
+        Requires=fleet.service
+        After=fleet.service
+        Requires=etcd2.service
+        After=etcd2.service
+
+        [Service]
+        SyslogIdentifier=%p
+        EnvironmentFile=/etc/kibana/kibana.env
+        TimeoutStartSec=1min
+        ExecStartPre=/usr/bin/test $ELASTICSEARCH_URL
+        ExecStart=/usr/bin/docker run --rm --name kibana \
+          -e ELASTICSEARCH_URL=${ELASTICSEARCH_URL} \
+          kibana
+        Restart=always
+        RestartSec=60
+
+        [X-Fleet]
+        MachineOf=kibana.confd.service
+
+    - name: vulcand.fleet.service
+      command: start
+      enable: true
+      content: |
+        [Unit]
+        Requires=download-confd.service
+        After=download-confd.service
+        Requires=flanneld.service
+        After=flanneld.service
+        Requires=fleet.service
+        After=fleet.service
+        Requires=etcd2.service
+        After=etcd2.service
+
+        [Service]
+        SyslogIdentifier=%p
+        WorkingDirectory=/etc/systemd/system/
+        EnvironmentFile=/run/flannel/subnet.env
+        TimeoutStartSec=5min
+        ExecStartPre=/usr/bin/test $FLANNEL_NETWORK
+        ExecStartPre=-/usr/bin/etcdctl mkdir vulcand
+        ExecStart=/opt/bin/fleet-ensure-launched vulcand.service
+        RemainAfterExit=yes
+        Type=oneshot
+
+    - name: vulcand.service
+      content: |
+        [Unit]
+        Requires=flanneld.service
+        After=flanneld.service
+        Requires=fleet.service
+        After=fleet.service
+        Requires=etcd2.service
+        After=etcd2.service
+
+        [Service]
+        SyslogIdentifier=%p
+        EnvironmentFile=/etc/network-environment
+        TimeoutStartSec=2min
+        ExecStartPre=/usr/bin/test $DEFAULT_IPV4
+        ExecStart=/opt/bin/docker-vulcand %p
+        Restart=always
+        RestartSec=30
+
+        [X-Fleet]
+        Global=true
+
+write_files:
+  - path: "/etc/etcd2-environment"
+    permissions: "0644"
+    owner: "etcd"
+
+  - path: "/opt/bin/fleet-ensure-launched"
+    permissions: "0755"
+    owner: "root"
+    content: |
+      #!/bin/bash
+
+      set -o pipefail
+
+      if [ -z $1 ]
+      then
+        echo '$1 is needed for unit name' >&2
+        exit 1
+      fi
+
+      STATE=$(/usr/bin/curl -fs --unix-socket /var/run/fleet.sock http:/fleet/v1/units/$1 | jq -r .desiredState)
+      if [ $? -ne 0 ]
+      then
+        /usr/bin/fleetctl start $1
+      elif [ ${STATE} != "launched" ]
+      then
+        echo "$0: $1 not yet launched: ${STATE}"
+      else
+        echo "$1 launched"
+      fi
+
+  - path: "/opt/bin/sidekick"
+    permissions: "0755"
+    owner: "root"
+    content: |
+      #!/bin/bash
+
+      TTL=60
+
+      if [ -z $1 ]
+      then
+        echo '$0: $1 is needed for container name' >&2
+        exit 1
+      fi
+
+      ETCD_KEY=$2
+      if [ -z ${ETCD_KEY} ]
+      then
+        echo '$0 will create ETCD_KEY=$1'
+        ETCD_KEY=$1
+      fi
+
+      while true
+      do
+        IP=$(docker inspect --format='{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' $1)
+        if [ $? -eq 0 ]
+        then
+            echo -n "etcdctl setting with TTL=${TTL} $1="
+            etcdctl set ${ETCD_KEY} ${IP} --ttl ${TTL}
+        else
+          echo "No such image or container: $1" >&2
+        fi
+        sleep $(( ${TTL}/2 ))
+      done
+
+  - path: "/opt/bin/sidekick-vulcand"
+    permissions: "0755"
+    owner: "root"
+    content: |
+      #!/bin/bash
+
+      TTL=60
+
+      if [ -z $1 ]
+      then
+        echo '$0: $1 is needed for container name' >&2
+        exit 1
+      fi
+      CONTAINER_NAME=$1
+
+      if [ -z $2 ]
+      then
+        echo '$0: $2 is needed for the service back and front name' >&2
+        exit 1
+      fi
+      SERVICE_NAME=$2
+
+      if [ -z $3 ]
+      then
+        echo '$0: $3 is needed for the port number' >&2
+        exit 1
+      fi
+      PORT_NUMBER=$3
+
+      while true
+      do
+        IP=$(docker inspect --format='{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' ${CONTAINER_NAME})
+        if [ $? -eq 0 ]
+        then
+            etcdctl set vulcand/backends/${SERVICE_NAME}/servers/${CONTAINER_NAME} \
+              "{\"URL\": \"http://${IP}:${PORT_NUMBER}\" }" \
+              --ttl ${TTL}
+
+            etcdctl set vulcand/backends/${SERVICE_NAME}/backend \
+              "{\"Type\": \"http\"}" \
+              --ttl ${TTL}
+
+            etcdctl set vulcand/frontends/${SERVICE_NAME}/frontend \
+              "{\"Type\": \"http\", \"BackendId\": \"${SERVICE_NAME}\", \"Route\": \"PathRegexp(\\\"/.*\\\")\"}" \
+              --ttl ${TTL}
+        else
+          echo "No such image or container: ${CONTAINER_NAME}" >&2
+        fi
+        sleep $(( ${TTL}/2 ))
+      done
+
+  - path: "/opt/logstash_fowarder/confd/conf.d/logstash.toml"
+    permissions: "0644"
+    owner: "root"
+    content: |
+      [template]
+      src = "logstash.tmpl"
+      dest = "/etc/logstash/logstash.conf"
+      keys = [
+        "/elasticsearch_master",
+        "/logstash/inputs",
+        "/logstash/filters",
+        "/logstash/outputs"
+        ]
+      owner = "root"
+      mode = "0644"
+      reload_cmd = "/usr/bin/systemctl restart logstash.service"
+
+  - path: "/opt/logstash_fowarder/confd/templates/logstash.tmpl"
+    permissions: "0644"
+    owner: "root"
+    content: |
+      {{ range getvs "/logstash/inputs/*" }}
+      {{.}}
+      {{end}}
+      {{ range getvs "/logstash/filters/*" }}
+      {{.}}
+      {{end}}
+      {{ range getvs "/logstash/outputs/*" }}
+      {{.}}
+      {{end}}
+      output {
+          elasticsearch {
+              hosts => "{{ getv "/elasticsearch_master" }}:9200"
+          }
+      }
+
+  - path: "/opt/kibana/confd/conf.d/kibana.toml"
+    permissions: "0644"
+    owner: "root"
+    content: |
+      [template]
+      src = "kibana.tmpl"
+      dest = "/etc/kibana/kibana.env"
+      keys = [ "/elasticsearch_master" ]
+      owner = "root"
+      mode = "0644"
+      reload_cmd = "/usr/bin/systemctl restart kibana.service"
+
+  - path: "/opt/kibana/confd/templates/kibana.tmpl"
+    permissions: "0644"
+    owner: "root"
+    content: |
+      ELASTICSEARCH_URL=http://{{getv "/elasticsearch_master"}}:9200
+
+  - path: "/opt/bin/docker-vulcand"
+    permissions: "0755"
+    owner: "root"
+    content: |
+      #!/bin/bash
+
+      source /etc/network-environment
+
+      if [ -z $1 ]
+      then
+        echo '$0: $1 is needed for container name' >&2
+        exit 1
+      fi
+
+      /usr/bin/docker run --rm --name $1 -p 80:80 \
+        julienbalestra/vulcand -etcd=http://${DEFAULT_IPV4}:2379 -port=80
+
+  - path: "/etc/logstash/logstash.conf"
+    permissions: "0644"
+    owner: "root"
+
+  - path: "/etc/kibana/kibana.env"
+    permissions: "0644"
+    owner: "root"
+
+  - path: "/var/lib/journald-stream.d/sincedb"
+    permissions: "0644"
+    owner: "root"
+
+  - path: "/opt/bin/setup-etcd2-environment"
+    permissions: "0755"
+    owner: "root"
+    content: |
+      #!/bin/bash -e
+      ETCD_ENV_FILE=/etc/etcd2-environment
+
+      ETCD_DISCOVERY_URL=$(curl -sL https://raw.githubusercontent.com/JulienBalestra/coreos_deploy/master/.etcd_discovery)
+
+      cat << EOF | tee ${ETCD_ENV_FILE}
+      ETCD_DISCOVERY="${ETCD_DISCOVERY_URL}"
+      ETCD_ADVERTISE_CLIENT_URLS="http://${DEFAULT_IPV4}:2379"
+      ETCD_INITIAL_ADVERTISE_PEER_URLS="http://${DEFAULT_IPV4}:2380"
+      ETCD_LISTEN_CLIENT_URLS="http://0.0.0.0:2379,http://0.0.0.0:4001"
+      ETCD_LISTEN_PEER_URLS="http://${DEFAULT_IPV4}:2380,http://${DEFAULT_IPV4}:7001"
+      EOF
+
+  - path: "/opt/bin/ensure-etcd-cluster-health"
+    permissions: "0755"
+    owner: "root"
+    content: |
+      #!/bin/bash
+
+      WAIT=5
+
+      until /usr/bin/etcdctl cluster-health
+      do
+        echo "etcd cluster still not healthy retry in ${WAIT}" >&2
+        sleep ${WAIT}
+      done
+
+  - path: "/opt/bin/wait-until-reachable"
+    permissions: "0755"
+    owner: "root"
+    content: |
+      #!/bin/bash
+
+      WAIT=10
+
+      if [ -z $1 ]
+      then
+        echo '$1 is needed for curl url' >&2
+        exit 1
+      fi
+
+      until /usr/bin/curl -sf $1
+      do
+        echo "curl $1 failed retry in ${WAIT}" >&2
+        sleep ${WAIT}
+      done
+
+
+manage_etc_hosts: "localhost"
+
+users:
+  - name: "core"
+    groups:
+      - sudo
+    ssh_authorized_keys:
+      - ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQDardEXUqvIcv++0S9rTTxif+r1kmlpjcB0cYtfQVVC2ouvCzSXh9o6WTZfsU0CRsirdh3ZHe0Zx7VXGKdAvx8W33miMwRz9vj57edlKbzpPpJ2XKTGi2dpE+oD9zlRcMMhgN2i3kSlOHkF2ROOx74902LFFE8G251rHHWkA/NjJ5Zvpa/H43SfP/iKTFBjp6CYlc/up9v/K1wyp2aaWDeHfTIxMz8COmuqt5J/34jHnriARrvbx/L4jWsuO6qiWj4FXX8fmOf4hZKU1DZIdbk7/qcR1nImygioWzZ9g+YRL9m5nfByKa0dNdm+U6OlmRvGw/KFhiE69B2el/hS3hBl Generated-by-Nova
+      - ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC5iQ37uoDiiwbG+w+HQr+o1kKeanTF5mpM/kIGli6h9mFkB9wdnjMx/CyLxuSK5SVj0xlLlwuGw+ef/g0PLftw1jJrBLNmWVYl2iGGlyZ8CQlTdEUVfzHcE7JEmp8QRABPZTWOYtayYxQmJLMMevsAO/QEM9Xr9nHZ2JvBS57clq0vcfsqQB68HGHk0SWBL9dRUUUSDca+/rTzCZhT+MPslvywCJWYLyV2KCSbVAt90IscDHH3VQ4XRTuKAOBrlL20832b+4Q4H/L0Oa5qt4jKEYb9BFlcjghB0MjGPuP0/XEYY7rGd6aGu56yKsSedBJnlhUqhrWmETqZ+8rr32mP Generated-by-Nova
