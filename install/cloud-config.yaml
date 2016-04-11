@@ -640,7 +640,8 @@ write_files:
       #!/bin/bash -e
       ETCD_ENV_FILE=/etc/etcd2-environment
 
-      ETCD_DISCOVERY_URL=$(curl -sL https://raw.githubusercontent.com/JulienBalestra/coreos_deploy/master/.etcd_discovery)
+      ETCD_DISCOVERY_URL=$(curl -sL http://coreos-deploy.s3-website-eu-west-1.amazonaws.com/discovery_etcd.json | \
+        jq -r .url)
 
       cat << EOF | tee ${ETCD_ENV_FILE}
       ETCD_DISCOVERY="${ETCD_DISCOVERY_URL}"
