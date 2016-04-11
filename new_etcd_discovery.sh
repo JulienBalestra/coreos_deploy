@@ -2,16 +2,15 @@
 
 set -e
 
-ETCD_DISCOVERY=.etcd_discovery
-GIT_CACHE_TIMEOUT=432000
+TARGET=http://coreos-deploy.s3-website-eu-west-1.amazonaws.com/discovery_etcd.json
+BUCKET="coreos-deploy"
 SIZE=$1
+TS=$(date +"%s")
 
 if [ -z ${SIZE} ]
 then
     echo "give a size"
     exit 1
-else
-    DISCOVERY_URL=$(curl -sL https://discovery.etcd.io/new?size=${SIZE})
 fi
 
 function go_to_dirname
@@ -28,19 +27,14 @@ function go_to_dirname
 
 function publish_discovery
 {
-    git config --global credential.helper "cache --timeout=${GIT_CACHE_TIMEOUT}"
-
-    printf "${DISCOVERY_URL}" > ${ETCD_DISCOVERY}
-
-    git add ${ETCD_DISCOVERY}
-    git commit -m "New etcd discovery key of size=${SIZE}"
-    git push origin master
+    docker run --rm docker run --rm \
+    -e AWS_ID=${AWS_ID} -e AWS_SECRET=${AWS_SECRET} \
+    julienbalestra/coreos_publisher ${SIZE} ${BUCKET}
 }
 
 function is_published
 {
-    until [ $(curl -sL https://raw.githubusercontent.com/JulienBalestra/coreos_deploy/master/.etcd_discovery) == \
-           ${DISCOVERY_URL} ]
+    until [ $(curl ${TARGET} | jq -r .url_ts) -gt ${TS} ]
     do
         echo "Target NOT up to date" >&2
         sleep 5
@@ -49,6 +43,7 @@ function is_published
 
 function poller
 {
+    DISCOVERY_URL=$(curl ${TARGET} | jq -r .url)
     printf "\n${DISCOVERY_URL}\n"
     printf "\ncurl -Ls \'${DISCOVERY_URL}?wait=true&recursive=true\'"
     printf "\nPolling... SIGINT to leave\n"
