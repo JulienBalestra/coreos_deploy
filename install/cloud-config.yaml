@@ -619,7 +619,7 @@ write_files:
       fi
 
       /usr/bin/docker run --rm --name $1 -p 80:80 \
-        julienbalestra/vulcand -etcd=http://${DEFAULT_IPV4}:2379 -port=80
+        quay.io/julienbalestra/vulcand -etcd=http://${DEFAULT_IPV4}:2379 -port=80
 
   - path: "/etc/logstash/logstash.conf"
     permissions: "0644"
