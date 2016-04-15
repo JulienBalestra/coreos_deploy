@@ -258,7 +258,7 @@ coreos:
         ExecStartPre=/usr/bin/etcdctl get elasticsearch_master
         ExecStartPre=/usr/bin/docker pull logstash
         ExecStartPre=/usr/bin/test $FLANNEL_NETWORK
-        ExecStart=/opt/bin/confd -confdir="/opt/logstash_fowarder/confd" -node http://127.0.0.1:2379 -watch=true
+        ExecStart=/opt/bin/confd -confdir="/opt/logstash_forwarder/confd" -node http://127.0.0.1:2379 -watch=true
         Restart=always
         RestartSec=30
         TimeoutStartSec=5min
@@ -539,7 +539,7 @@ write_files:
         sleep $(( ${TTL}/2 ))
       done
 
-  - path: "/opt/logstash_fowarder/confd/conf.d/logstash.toml"
+  - path: "/opt/logstash_forwarder/confd/conf.d/logstash.toml"
     permissions: "0644"
     owner: "root"
     content: |
@@ -556,7 +556,7 @@ write_files:
       mode = "0644"
       reload_cmd = "/usr/bin/systemctl restart logstash.service"
 
-  - path: "/opt/logstash_fowarder/confd/templates/logstash.tmpl"
+  - path: "/opt/logstash_forwarder/confd/templates/logstash.tmpl"
     permissions: "0644"
     owner: "root"
     content: |
