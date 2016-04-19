@@ -609,7 +609,11 @@ write_files:
     permissions: "0755"
     owner: "root"
     content: |
-      #!/bin/bash -e
+      #!/bin/bash
+
+      set -e
+      set -o pipefail
+
       ETCD_ENV_FILE=/etc/etcd2-environment
 
       ETCD_DISCOVERY_URL=$(curl -sL http://coreos-deploy.s3-website-eu-west-1.amazonaws.com/discovery_etcd.json | \
