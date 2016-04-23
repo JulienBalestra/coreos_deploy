@@ -283,7 +283,8 @@ coreos:
         ExecStartPre=/usr/bin/test -f /opt/bin/journald-stream
         ExecStartPre=/usr/bin/test -f /etc/logstash/logstash.conf
         ExecStartPre=/usr/bin/test -f /var/lib/journald-stream.d/sincedb
-        ExecStartPre=-/usr/bin/docker stop forwarder
+        ExecStartPre=-/usr/bin/docker kill forwarder
+        ExecStartPre=-/usr/bin/docker rm forwarder
         ExecStart=/usr/bin/docker run --rm --name forwarder --cpuset-cpus="0" \
           -v /opt/bin/journald-stream:/opt/journald-stream:ro \
           -v /run/log/journal:/run/log/journal:ro \
@@ -292,6 +293,7 @@ coreos:
           -e SINCE_DB_PATH=/var/lib/journald-stream.d/sincedb \
           logstash \
             /bin/bash -c 'logstash -f /etc/logstash.conf'
+        ExecStop=/usr/bin/docker stop forwarder
         Restart=always
         RestartSec=60
         TimeoutStartSec=5min
