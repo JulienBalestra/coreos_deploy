@@ -35,6 +35,7 @@ coreos:
         After=network-online.target
 
         [Service]
+        SyslogIdentifier=%p
         Environment=TARGET_URL=https://github.com/kelseyhightower/setup-network-environment/releases/download/1.0.1/setup-network-environment
         ExecStartPre=/opt/bin/wait-until-reachable $TARGET_URL
         ExecStartPre=-/usr/bin/mkdir -p /opt/bin
@@ -54,6 +55,7 @@ coreos:
         After=download-network-environment.service
 
         [Service]
+        SyslogIdentifier=%p
         ExecStart=/opt/bin/setup-network-environment
         Type=oneshot
 
@@ -67,6 +69,7 @@ coreos:
         After=setup-network-environment.service
 
         [Service]
+        SyslogIdentifier=%p
         User=etcd
         EnvironmentFile=/etc/network-environment
         ExecStart=/opt/bin/setup-etcd2-environment
@@ -84,6 +87,7 @@ coreos:
             After=setup-etcd2-environment.service
 
             [Service]
+            SyslogIdentifier=%p
             EnvironmentFile=/etc/etcd2-environment
 
     - name: download-journald-stream.service
@@ -95,6 +99,7 @@ coreos:
         After=network-online.target
 
         [Service]
+        SyslogIdentifier=%p
         Environment=TARGET_URL=https://github.com/JulienBalestra/journald-stream/releases/download/0.3/journald-stream
         ExecStartPre=/opt/bin/wait-until-reachable $TARGET_URL
         ExecStartPre=/usr/bin/mkdir -p /opt/bin
@@ -113,6 +118,7 @@ coreos:
         After=network-online.target
 
         [Service]
+        SyslogIdentifier=%p
         Environment=TARGET_URL=https://github.com/kelseyhightower/confd/releases/download/v0.11.0/confd-0.11.0-linux-amd64
         ExecStartPre=/opt/bin/wait-until-reachable $TARGET_URL
         ExecStartPre=/usr/bin/mkdir -p /opt/bin
@@ -133,6 +139,7 @@ coreos:
         - name: "50-network-config.conf"
           content: |
             [Service]
+            SyslogIdentifier=%p
             ExecStartPre=/usr/bin/etcdctl set /coreos.com/network/config \
               '{"Network":"10.1.0.0/16", "Backend": {"Type": "vxlan"}}'
 
@@ -143,6 +150,7 @@ coreos:
         After=flanneld.service
 
         [Service]
+        SyslogIdentifier=%p
         EnvironmentFile=/run/flannel/subnet.env
         TimeoutStartSec=5min
         ExecStartPre=/usr/bin/docker pull elasticsearch
@@ -167,6 +175,7 @@ coreos:
         After=etcd2.service
 
         [Service]
+        SyslogIdentifier=%p
         WorkingDirectory=/etc/systemd/system/
         TimeoutStartSec=5min
         ExecStart=/opt/bin/fleet-ensure-launched elasticsearch@master
@@ -181,6 +190,7 @@ coreos:
         After=etcd2.service
 
         [Service]
+        SyslogIdentifier=%p
         ExecStartPre=/usr/bin/etcdctl cluster-health
         ExecStartPre=/usr/bin/docker inspect --format='{{.Name}} is {{.State.Status}}' elasticsearch_%i
         ExecStart=/opt/bin/sidekick elasticsearch_%i
@@ -332,6 +342,7 @@ coreos:
         After=etcd2.service
 
         [Service]
+        SyslogIdentifier=%p
         ExecStartPre=/usr/bin/etcdctl cluster-health
         ExecStartPre=/usr/bin/docker inspect --format='{{.Name}} is {{.State.Status}}' kibana
         ExecStart=/opt/bin/sidekick-vulcand kibana kibana 5601
